@@ -8,7 +8,7 @@ import os
 import unittest
 from unittest.mock import MagicMock, patch
 
-sys.path.insert(0, os.path.dirname(__file__))
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 from mcprotocol import MCProtocol3E
 
 
