@@ -121,6 +121,20 @@ Context manager (`with` statement) calls `connect()` / `close()` automatically.
 
 Raises `RuntimeError` with the PLC end code on communication errors.
 
+## Memory Usage (MicroPython)
+
+This library allocates only what each operation needs — no large static buffers.
+Typical heap usage per call is well under 1 KB, making it suitable for ESP32-class
+devices (e.g. M5Stamp) with ~150–250 KB of available heap after boot.
+
+**Recommendations for constrained devices:**
+
+| Guideline | Detail |
+|-----------|--------|
+| Prefer binary mode | ASCII mode builds intermediate strings and uses more heap |
+| Keep batch size moderate | Reading 500+ words at once produces a large result list; prefer smaller batches |
+| Typical safe range | 10–100 words / 8–256 bits per request is well within limits |
+
 ## Notes
 
 - ASCII mode encodes word device addresses as decimal, bit device addresses as hex — matching Mitsubishi PLC specification.
