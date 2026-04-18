@@ -30,8 +30,11 @@ Inspired by [pymcprotocol](https://github.com/senrust/pymcprotocol).
 | L | 0x92 | Bit |
 | B | 0xA0 | Bit |
 | F | 0x93 | Bit |
+| SB | 0xA1 | Bit |
+| SW | 0xB5 | Word |
 | TN | 0xC2 | Word |
 | CN | 0xC5 | Word |
+| Z | 0xCC | Word |
 
 ## Requirements
 
@@ -97,7 +100,7 @@ with MCProtocol3E('192.168.1.10') as plc:
 
 ## API
 
-### `MCProtocol3E(host, port=1025, mode='binary', timeout=5.0)`
+### `MCProtocol3E(host, port=1025, mode='binary', timeout=5.0, timer=0x0010)`
 
 | Parameter | Default | Description |
 |-----------|---------|-------------|
@@ -105,6 +108,7 @@ with MCProtocol3E('192.168.1.10') as plc:
 | `port` | `1025` | TCP port |
 | `mode` | `'binary'` | `'binary'` or `'ascii'` |
 | `timeout` | `5.0` | Socket timeout in seconds |
+| `timer` | `0x0010` | Monitoring timer (units of 250 ms) |
 
 ### Methods
 
@@ -119,7 +123,7 @@ with MCProtocol3E('192.168.1.10') as plc:
 
 Context manager (`with` statement) calls `connect()` / `close()` automatically.
 
-Raises `RuntimeError` with the PLC end code on communication errors.
+Raises `MCProtocolError` (with `end_code` attribute) on PLC errors, and `MCProtocolConnectionError` (subclass of `OSError`) on network failures.
 
 ## Memory Usage (MicroPython)
 
@@ -135,11 +139,25 @@ devices (e.g. M5Stamp) with ~150–250 KB of available heap after boot.
 | Keep batch size moderate | Reading 500+ words at once produces a large result list; prefer smaller batches |
 | Typical safe range | 10–100 words / 8–256 bits per request is well within limits |
 
+## Scope
+
+**Supported:**
+- 3E frame over TCP
+- Binary and ASCII encoding
+- Batch read / write for word and bit devices
+
+**Not supported (by design):**
+- UDP transport
+- Random read / write (multi-device mixed access)
+- Monitor mode
+- Extended frames (4E, etc.)
+- Remote control commands (Run / Stop / Reset)
+
 ## Notes
 
+- In binary bit read/write, two bit values are packed per byte — even-index in the low nibble, odd-index in the high nibble.
 - ASCII mode encodes word device addresses as decimal, bit device addresses as hex — matching Mitsubishi PLC specification.
 - The maximum points per request depends on the PLC model (typically 960 words / 7168 bits for batch read).
-- No remote control commands (Run / Stop / Reset) are included by design.
 
 ## Running Tests
 

@@ -9,7 +9,7 @@ import unittest
 from unittest.mock import MagicMock, patch
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
-from mcprotocol import MCProtocol3E
+from mcprotocol import MCProtocol3E, MCProtocolError, MCProtocolConnectionError
 
 
 # ── helpers: build fake PLC responses ────────────────────────────────────────
@@ -96,7 +96,6 @@ class TestBinaryFrames(unittest.TestCase):
         p._sock.recv.side_effect = _bin_side(data=b'\x00')
         p.read_bits('M', 0, 1)
         frame = _sent(p)
-        # subcmd is at byte offset 13 in binary frame
         subcmd = struct.unpack_from('<H', frame, 13)[0]
         self.assertEqual(subcmd, 0x0001)
 
@@ -108,25 +107,33 @@ class TestBinaryFrames(unittest.TestCase):
         self.assertEqual(_sent(p)[-2:], b'\x01\x01')
 
     def test_device_code_X(self):
-        """X device must use binary code 0x9C."""
         p = _plc()
         p._sock.recv.side_effect = _bin_side(data=b'\x00\x00')
         p.read_words('X', 0, 1)
         self.assertIn(b'\x9C', _sent(p))
 
     def test_device_code_W(self):
-        """W device must use binary code 0xB4."""
         p = _plc()
         p._sock.recv.side_effect = _bin_side(data=b'\x00\x00')
         p.read_words('W', 0, 1)
         self.assertIn(b'\xB4', _sent(p))
 
     def test_device_lowercase_accepted(self):
-        """Device names should be case-insensitive."""
         p = _plc()
         p._sock.recv.side_effect = _bin_side(data=b'\x00\x00')
         p.read_words('d', 0, 1)
         self.assertIn(b'\xA8', _sent(p))
+
+    def test_custom_timer(self):
+        """Timer parameter must appear in the frame."""
+        p = MCProtocol3E('127.0.0.1', timer=0x0020)
+        p._sock = MagicMock()
+        p._sock.send.side_effect = lambda data: len(data)
+        p._sock.recv.side_effect = _bin_side(data=b'\x00\x00')
+        p.read_words('D', 0, 1)
+        frame = _sent(p)
+        timer = struct.unpack_from('<H', frame, 9)[0]
+        self.assertEqual(timer, 0x0020)
 
 
 # ── binary response parsing ───────────────────────────────────────────────────
@@ -145,16 +152,15 @@ class TestBinaryResponse(unittest.TestCase):
 
     def test_read_bits_nibble_unpack(self):
         """
-        Bit response bytes: each byte holds 2 bits.
-          byte 0x11 → bit0 = lo nibble = 1, bit1 = hi nibble = 1
-          byte 0x10 → bit2 = 0, bit3 = 1
+        Bit response bytes: each byte holds 2 bits in nibbles.
+          byte 0x11 -> bit0 = lo nibble = 1, bit1 = hi nibble = 1
+          byte 0x10 -> bit2 = lo nibble = 0, bit3 = hi nibble = 1
         """
         p = _plc()
         p._sock.recv.side_effect = _bin_side(data=b'\x11\x10')
         self.assertEqual(p.read_bits('M', 0, 4), [1, 1, 0, 1])
 
     def test_read_bits_odd_count(self):
-        """Odd count reads should not over-read the response buffer."""
         p = _plc()
         p._sock.recv.side_effect = _bin_side(data=b'\x01')
         self.assertEqual(p.read_bits('M', 0, 1), [1])
@@ -175,31 +181,26 @@ class TestBinaryResponse(unittest.TestCase):
 class TestAsciiMode(unittest.TestCase):
 
     def test_read_words_frame_structure(self):
-        """ASCII frame must start with 500000FF03FF00, contain 0401 and device."""
         p = _plc(mode='ascii')
         p._sock.recv.side_effect = _asc_side(data='0000')
         p.read_words('D', 100, 1)
         frame = _sent(p).decode()
         self.assertTrue(frame.startswith('500000FF03FF00'))
         self.assertIn('0401', frame)
-        self.assertIn('0000', frame)
 
     def test_read_words_d_decimal_addr(self):
-        """D (word device) address must be encoded as 6-digit decimal."""
         p = _plc(mode='ascii')
         p._sock.recv.side_effect = _asc_side(data='0001')
         p.read_words('D', 100, 1)
         self.assertIn('000100', _sent(p).decode())
 
     def test_read_words_x_hex_addr(self):
-        """X (bit device) address must be encoded as 6-digit hex."""
         p = _plc(mode='ascii')
         p._sock.recv.side_effect = _asc_side(data='0001')
         p.read_words('X', 0x10, 1)
         self.assertIn('000010', _sent(p).decode())
 
     def test_write_words_frame(self):
-        """ASCII write must use CMD WRITE 1401 and encode value as 4-hex."""
         p = _plc(mode='ascii')
         p._sock.recv.side_effect = _asc_side()
         p.write_words('D', 0, [0x00FF])
@@ -218,14 +219,12 @@ class TestAsciiMode(unittest.TestCase):
         self.assertEqual(p.read_bits('M', 0, 4), [1, 0, 1, 0])
 
     def test_write_bits_frame(self):
-        """ASCII bit write must encode each value as '0' or '1' char."""
         p = _plc(mode='ascii')
         p._sock.recv.side_effect = _asc_side()
         p.write_bits('M', 0, [1, 0, 1])
         self.assertIn('101', _sent(p).decode())
 
     def test_ascii_data_length_field(self):
-        """Length field must equal the char count of the inner payload."""
         p = _plc(mode='ascii')
         p._sock.recv.side_effect = _asc_side(data='0000')
         p.read_words('D', 0, 1)
@@ -239,39 +238,91 @@ class TestAsciiMode(unittest.TestCase):
 
 class TestErrorHandling(unittest.TestCase):
 
-    def test_binary_nonzero_end_code_raises(self):
+    def test_binary_plc_error_type(self):
+        """Non-zero end code must raise MCProtocolError with end_code attr."""
         p = _plc()
         p._sock.recv.side_effect = _bin_side(end_code=0xC059)
-        with self.assertRaises(RuntimeError) as ctx:
+        with self.assertRaises(MCProtocolError) as ctx:
             p.read_words('D', 0, 1)
+        self.assertEqual(ctx.exception.end_code, 0xC059)
         self.assertIn('C059', str(ctx.exception))
 
-    def test_ascii_nonzero_end_code_raises(self):
+    def test_ascii_plc_error_type(self):
         p = _plc(mode='ascii')
         p._sock.recv.side_effect = _asc_side(end_code=0xC059)
-        with self.assertRaises(RuntimeError) as ctx:
+        with self.assertRaises(MCProtocolError) as ctx:
             p.read_words('D', 0, 1)
-        self.assertIn('C059', str(ctx.exception))
+        self.assertEqual(ctx.exception.end_code, 0xC059)
+
+    def test_connection_error_type(self):
+        """Not-connected must raise MCProtocolConnectionError (subclass of OSError)."""
+        p = MCProtocol3E('127.0.0.1')
+        with self.assertRaises(MCProtocolConnectionError):
+            p.read_words('D', 0, 1)
+
+    def test_connection_error_is_oserror(self):
+        """MCProtocolConnectionError must be catchable as OSError."""
+        p = MCProtocol3E('127.0.0.1')
+        with self.assertRaises(OSError):
+            p.read_words('D', 0, 1)
 
     def test_binary_zero_end_code_no_raise(self):
         p = _plc()
         p._sock.recv.side_effect = _bin_side(end_code=0, data=b'\x00\x00')
         p.read_words('D', 0, 1)  # must not raise
 
-    def test_write_binary_error_raises(self):
+    def test_write_plc_error_raises(self):
         p = _plc()
         p._sock.recv.side_effect = _bin_side(end_code=0x0055)
-        with self.assertRaises(RuntimeError):
+        with self.assertRaises(MCProtocolError):
             p.write_words('D', 0, [1])
 
     def test_invalid_mode_raises(self):
         with self.assertRaises(ValueError):
             MCProtocol3E('127.0.0.1', mode='invalid')
 
-    def test_send_before_connect_raises(self):
-        p = MCProtocol3E('127.0.0.1')
-        with self.assertRaises(OSError):
-            p.read_words('D', 0, 1)
+
+# ── input validation ──────────────────────────────────────────────────────────
+
+class TestValidation(unittest.TestCase):
+
+    def test_unsupported_device_raises(self):
+        p = _plc()
+        with self.assertRaises(ValueError) as ctx:
+            p.read_words('Q', 0, 1)
+        self.assertIn('Q', str(ctx.exception))
+
+    def test_negative_start_raises(self):
+        p = _plc()
+        with self.assertRaises(ValueError):
+            p.read_words('D', -1, 1)
+
+    def test_zero_count_raises(self):
+        p = _plc()
+        with self.assertRaises(ValueError):
+            p.read_words('D', 0, 0)
+
+    def test_valid_device_passes(self):
+        """All known devices must pass validation without raising."""
+        p = _plc()
+        for dev in ('D', 'W', 'R', 'ZR', 'X', 'Y', 'M', 'L', 'B', 'F',
+                     'SB', 'SW', 'TN', 'CN', 'Z'):
+            p._sock.recv.side_effect = _bin_side(data=b'\x00\x00')
+            p.read_words(dev, 0, 1)
+
+    def test_short_binary_payload_raises(self):
+        """Binary read with truncated payload must raise MCProtocolConnectionError."""
+        p = _plc()
+        p._sock.recv.side_effect = _bin_side(data=b'\x01')  # 1 byte, but count=2 needs 4
+        with self.assertRaises(MCProtocolConnectionError):
+            p.read_words('D', 0, 2)
+
+    def test_short_ascii_payload_raises(self):
+        """ASCII read with truncated payload must raise MCProtocolConnectionError."""
+        p = _plc(mode='ascii')
+        p._sock.recv.side_effect = _asc_side(data='00')  # 2 chars, but count=2 needs 8
+        with self.assertRaises(MCProtocolConnectionError):
+            p.read_words('D', 0, 2)
 
 
 # ── connection lifecycle ──────────────────────────────────────────────────────
@@ -284,7 +335,6 @@ class TestConnection(unittest.TestCase):
         self.assertIsNone(p._sock)
 
     def test_close_idempotent(self):
-        """Calling close() twice must not raise."""
         p = _plc()
         p.close()
         p.close()

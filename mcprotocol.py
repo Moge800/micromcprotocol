@@ -4,6 +4,23 @@ except ImportError:
     import socket
 import struct
 
+# ── exceptions ────────────────────────────────────────────────────────────────
+
+
+class MCProtocolError(Exception):
+    """PLC returned a non-zero end code."""
+    def __init__(self, end_code):
+        self.end_code = end_code
+        super().__init__('MC error 0x{:04X}'.format(end_code))
+
+
+class MCProtocolConnectionError(OSError):
+    """Network-level communication failure."""
+    pass
+
+
+# ── constants ─────────────────────────────────────────────────────────────────
+
 # Binary device codes (iQ-R / Q series)
 _BIN_CODE = {
     'D': 0xA8, 'W': 0xB4, 'R': 0xAF, 'ZR': 0xB0,
@@ -27,13 +44,14 @@ _HDR_ASC = '500000FF03FF00'
 class MCProtocol3E:
     """3E frame MC protocol client (TCP, binary or ASCII mode)."""
 
-    def __init__(self, host, port=1025, mode='binary', timeout=5.0):
+    def __init__(self, host, port=1025, mode='binary', timeout=5.0, timer=0x0010):
         if mode not in ('binary', 'ascii'):
             raise ValueError("mode must be 'binary' or 'ascii'")
         self.host    = host
         self.port    = port
         self.mode    = mode
         self.timeout = timeout
+        self.timer   = timer   # monitoring timer (units of 250 ms)
         self._sock   = None
 
     # ── connection ────────────────────────────────────────────────
@@ -59,26 +77,25 @@ class MCProtocol3E:
     # ── send / recv helpers ───────────────────────────────────────
 
     def _send(self, data):
-        # MicroPython socket.send() may do a short write; loop until done.
         if self._sock is None:
-            raise OSError('not connected')
+            raise MCProtocolConnectionError('not connected')
         total = 0
         while total < len(data):
             n = self._sock.send(data[total:])
             if not n:
-                raise OSError('socket closed during send')
+                raise MCProtocolConnectionError('socket closed during send')
             total += n
 
     def _recv_n(self, n):
-        # TCP recv() may return fewer bytes than requested.
         if self._sock is None:
-            raise OSError('not connected')
+            raise MCProtocolConnectionError('not connected')
         buf = bytearray(n)
         pos = 0
         while pos < n:
             chunk = self._sock.recv(n - pos)
             if not chunk:
-                raise OSError('connection closed after {} of {} bytes'.format(pos, n))
+                raise MCProtocolConnectionError(
+                    'connection closed after {} of {} bytes'.format(pos, n))
             got = min(len(chunk), n - pos)
             buf[pos:pos + got] = chunk[:got]
             pos += got
@@ -87,11 +104,11 @@ class MCProtocol3E:
     # ── frame build / send ────────────────────────────────────────
 
     def _frame_bin(self, cmd, subcmd, body):
-        payload = struct.pack('<HHH', 0x0010, cmd, subcmd) + body
+        payload = struct.pack('<HHH', self.timer, cmd, subcmd) + body
         return _HDR_BIN + struct.pack('<H', len(payload)) + payload
 
     def _frame_asc(self, cmd, subcmd, body):
-        inner = '0010{:04X}{:04X}'.format(cmd, subcmd) + body
+        inner = '{:04X}{:04X}{:04X}'.format(self.timer, cmd, subcmd) + body
         return _HDR_ASC + '{:04X}'.format(len(inner)) + inner
 
     def _xfer_bin(self, frame):
@@ -108,16 +125,20 @@ class MCProtocol3E:
 
     def _chk_bin(self, data):
         if len(data) < 11:
-            raise RuntimeError('short response ({} bytes)'.format(len(data)))
+            raise MCProtocolConnectionError(
+                'short response ({} bytes)'.format(len(data)))
         ec = struct.unpack_from('<H', data, 9)[0]
         if ec:
-            raise RuntimeError('MC error 0x{:04X}'.format(ec))
+            raise MCProtocolError(ec)
         return data[11:]
 
     def _chk_asc(self, data):
+        if len(data) < 22:
+            raise MCProtocolConnectionError(
+                'short response ({} chars)'.format(len(data)))
         ec = int(data[18:22], 16)
         if ec:
-            raise RuntimeError('MC error 0x{:04X}'.format(ec))
+            raise MCProtocolError(ec)
         return data[22:]
 
     # ── device address encoding ───────────────────────────────────
@@ -132,40 +153,62 @@ class MCProtocol3E:
         num = '{:06d}'.format(addr) if dev in _WORD_DEVS else '{:06X}'.format(addr)
         return dev.ljust(2) + num
 
+    # ── input validation ──────────────────────────────────────────
+
+    def _validate(self, device, start, count):
+        dev = device.upper()
+        if dev not in _BIN_CODE:
+            raise ValueError("unsupported device '{}' (available: {})".format(
+                device, ', '.join(sorted(_BIN_CODE))))
+        if start < 0:
+            raise ValueError('start must be >= 0, got {}'.format(start))
+        if count <= 0:
+            raise ValueError('count must be > 0, got {}'.format(count))
+        return dev
+
     # ── public API ────────────────────────────────────────────────
 
     def read_words(self, device, start, count):
         """Read `count` word values from `device` starting at `start`."""
-        dev = device.upper()
+        dev = self._validate(device, start, count)
         if self.mode == 'binary':
             body = self._addr_bin(dev, start) + struct.pack('<H', count)
             raw = self._chk_bin(self._xfer_bin(self._frame_bin(_CMD_READ, _WORD, body)))
+            if len(raw) < count * 2:
+                raise MCProtocolConnectionError(
+                    'short payload: expected {} bytes, got {}'.format(count * 2, len(raw)))
             return [struct.unpack_from('<H', raw, i * 2)[0] for i in range(count)]
         body = self._addr_asc(dev, start) + '{:04X}'.format(count)
         raw = self._chk_asc(self._xfer_asc(self._frame_asc(_CMD_READ, _WORD, body)))
+        if len(raw) < count * 4:
+            raise MCProtocolConnectionError(
+                'short payload: expected {} chars, got {}'.format(count * 4, len(raw)))
         return [int(raw[i*4:(i+1)*4], 16) for i in range(count)]
 
     def write_words(self, device, start, values):
         """Write word `values` list to `device` starting at `start`."""
-        dev   = device.upper()
-        count = len(values)
+        dev = self._validate(device, start, len(values))
         if self.mode == 'binary':
-            body = self._addr_bin(dev, start) + struct.pack('<H', count)
-            wbuf = bytearray(count * 2)
+            body = self._addr_bin(dev, start) + struct.pack('<H', len(values))
+            wbuf = bytearray(len(values) * 2)
             for i, v in enumerate(values):
                 struct.pack_into('<H', wbuf, i * 2, v)
             self._chk_bin(self._xfer_bin(self._frame_bin(_CMD_WRITE, _WORD, body + bytes(wbuf))))
             return
-        body = self._addr_asc(dev, start) + '{:04X}'.format(count)
+        body = self._addr_asc(dev, start) + '{:04X}'.format(len(values))
         body += ''.join('{:04X}'.format(v) for v in values)
         self._chk_asc(self._xfer_asc(self._frame_asc(_CMD_WRITE, _WORD, body)))
 
     def read_bits(self, device, start, count):
         """Read `count` bit values (0/1) from `device` starting at `start`."""
-        dev = device.upper()
+        dev = self._validate(device, start, count)
         if self.mode == 'binary':
             body = self._addr_bin(dev, start) + struct.pack('<H', count)
             raw = self._chk_bin(self._xfer_bin(self._frame_bin(_CMD_READ, _BIT, body)))
+            expected = (count + 1) // 2
+            if len(raw) < expected:
+                raise MCProtocolConnectionError(
+                    'short payload: expected {} bytes, got {}'.format(expected, len(raw)))
             bits = []
             for i in range(count):
                 b = raw[i // 2]
@@ -173,19 +216,21 @@ class MCProtocol3E:
             return bits
         body = self._addr_asc(dev, start) + '{:04X}'.format(count)
         raw = self._chk_asc(self._xfer_asc(self._frame_asc(_CMD_READ, _BIT, body)))
+        if len(raw) < count:
+            raise MCProtocolConnectionError(
+                'short payload: expected {} chars, got {}'.format(count, len(raw)))
         return [int(raw[i]) & 0x01 for i in range(count)]
 
     def write_bits(self, device, start, values):
         """Write bit `values` list (0/1) to `device` starting at `start`."""
-        dev   = device.upper()
-        count = len(values)
+        dev = self._validate(device, start, len(values))
         if self.mode == 'binary':
-            body = self._addr_bin(dev, start) + struct.pack('<H', count)
-            buf  = bytearray((count + 1) // 2)
+            body = self._addr_bin(dev, start) + struct.pack('<H', len(values))
+            buf  = bytearray((len(values) + 1) // 2)
             for i, v in enumerate(values):
                 buf[i // 2] |= (v & 0x01) << (0 if i % 2 == 0 else 4)
             self._chk_bin(self._xfer_bin(self._frame_bin(_CMD_WRITE, _BIT, body + bytes(buf))))
             return
-        body = self._addr_asc(dev, start) + '{:04X}'.format(count)
+        body = self._addr_asc(dev, start) + '{:04X}'.format(len(values))
         body += ''.join(str(v & 1) for v in values)
         self._chk_asc(self._xfer_asc(self._frame_asc(_CMD_WRITE, _BIT, body)))
