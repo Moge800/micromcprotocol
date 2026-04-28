@@ -155,7 +155,7 @@ devices (e.g. M5Stamp) with ~150–250 KB of available heap after boot.
 
 ## Notes
 
-- In binary bit read/write, two bit values are packed per byte — even-index in the low nibble, odd-index in the high nibble.
+- In binary bit read/write, two bit values are packed per byte — even-index in the high nibble, odd-index in the low nibble.
 - ASCII mode encodes word device addresses as decimal, bit device addresses as hex — matching Mitsubishi PLC specification.
 - The maximum points per request depends on the PLC model (typically 960 words / 7168 bits for batch read).
 
