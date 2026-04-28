@@ -103,11 +103,11 @@ class TestBinaryFrames(unittest.TestCase):
         self.assertEqual(subcmd, 0x0001)
 
     def test_write_bits_packing(self):
-        """Bit values [1, 0, 1] must pack to bytes 0x01 0x01 (nibble pairs)."""
+        """Bit values [1, 0, 1] must pack to bytes 0x10 0x10 (nibble pairs)."""
         p = _plc()
         p._sock.recv.side_effect = _bin_side()
         p.write_bits("Y", 0, [1, 0, 1])
-        self.assertEqual(_sent(p)[-2:], b"\x01\x01")
+        self.assertEqual(_sent(p)[-2:], b"\x10\x10")
 
     def test_device_code_X(self):
         p = _plc()
@@ -157,16 +157,16 @@ class TestBinaryResponse(unittest.TestCase):
     def test_read_bits_nibble_unpack(self):
         """
         Bit response bytes: each byte holds 2 bits in nibbles.
-          byte 0x11 -> bit0 = lo nibble = 1, bit1 = hi nibble = 1
-          byte 0x10 -> bit2 = lo nibble = 0, bit3 = hi nibble = 1
+          byte 0x11 -> bit0 = hi nibble = 1, bit1 = lo nibble = 1
+          byte 0x10 -> bit2 = hi nibble = 1, bit3 = lo nibble = 0
         """
         p = _plc()
         p._sock.recv.side_effect = _bin_side(data=b"\x11\x10")
-        self.assertEqual(p.read_bits("M", 0, 4), [1, 1, 0, 1])
+        self.assertEqual(p.read_bits("M", 0, 4), [1, 1, 1, 0])
 
     def test_read_bits_odd_count(self):
         p = _plc()
-        p._sock.recv.side_effect = _bin_side(data=b"\x01")
+        p._sock.recv.side_effect = _bin_side(data=b"\x10")
         self.assertEqual(p.read_bits("M", 0, 1), [1])
 
     def test_write_words_returns_none(self):

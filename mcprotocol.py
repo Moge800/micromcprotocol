@@ -240,7 +240,7 @@ class MCProtocol3E:
             bits = []
             for i in range(count):
                 b = raw[i // 2]
-                bits.append((b if i % 2 == 0 else b >> 4) & 0x01)
+                bits.append((b >> 4 if i % 2 == 0 else b) & 0x01)
             return bits
         body = self._addr_asc(dev, start) + "{:04X}".format(count)
         raw = self._chk_asc(self._xfer_asc(self._frame_asc(_CMD_READ, _BIT, body)))
@@ -257,7 +257,7 @@ class MCProtocol3E:
             body = self._addr_bin(dev, start) + struct.pack("<H", len(values))
             buf = bytearray((len(values) + 1) // 2)
             for i, v in enumerate(values):
-                buf[i // 2] |= (v & 0x01) << (0 if i % 2 == 0 else 4)
+                buf[i // 2] |= (v & 0x01) << (4 if i % 2 == 0 else 0)
             self._chk_bin(
                 self._xfer_bin(self._frame_bin(_CMD_WRITE, _BIT, body + bytes(buf)))
             )
