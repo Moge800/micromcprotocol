@@ -90,7 +90,7 @@ def _handle(req):
             for i in range(count):
                 v = _rb(dev, addr + i)
                 vals.append(v)
-                buf[i // 2] |= v << (0 if i % 2 == 0 else 4)
+                buf[i // 2] |= v << (4 if i % 2 == 0 else 0)
             print('  [read]  {}{}+{} = {}'.format(dev, addr, count, vals))
             return _response(bytes(buf))
 
@@ -102,7 +102,7 @@ def _handle(req):
         else:  # BIT
             for i in range(count):
                 b = req[21 + i // 2]
-                _wb(dev, addr + i, (b if i % 2 == 0 else b >> 4) & 0x01)
+                _wb(dev, addr + i, (b >> 4 if i % 2 == 0 else b) & 0x01)
         return _response()
 
     return _response(end_code=0x4000)
